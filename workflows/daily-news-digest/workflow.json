@@ -1,0 +1,228 @@
+{
+  "name": "Daily News Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 6
+            }
+          ]
+        }
+      },
+      "id": "a1000001-0000-4000-8000-000000000001",
+      "name": "6 AM IST Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "  const feeds = {\n    technical: [\n      'https://simonwillison.net/atom/everything/',\n      'https://huggingface.co/blog/feed.xml',\n      'https://openai.com/news/rss.xml',\n      'https://deepmind.google/blog/rss.xml',\n      'https://magazine.sebastianraschka.com/feed',\n      'https://rss.arxiv.org/rss/cs.LG',\n      'https://blog.cloudflare.com/rss/',\n      'https://newsletter.pragmaticengineer.com/feed',\n      'https://news.ycombinator.com/rss',\n      'https://krebsonsecurity.com/feed/',\n    ],\n    world: [\n      'https://feeds.bbci.co.uk/news/world/rss.xml',\n      'https://www.aljazeera.com/xml/rss/all.xml',\n      'https://rss.dw.com/rdf/rss-en-all',\n      'https://www.france24.com/en/rss',\n      'https://www.scmp.com/rss/91/feed/',\n    ],\n  };\n  return Object.entries(feeds).flatMap(([category, urls]) =>\n    urls.map((url) => ({ json: { url, category } })),\n  );\n"
+      },
+      "id": "a1000001-0000-4000-8000-000000000002",
+      "name": "Feed List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "a1000001-0000-4000-8000-000000000003",
+      "name": "Read RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "  // Keep items from the last 26h (2h overlap so a late run never drops items).\n  // Per-feed caps and short snippets keep the prompt small (about 10k tokens); the gateway rejects prompts that are too large.\n  const WINDOW_MS = 26 * 60 * 60 * 1000;\n  const CAP = 12;\n  const ARXIV_CAP = 15; // arXiv dates are daily batches, so skip the date filter\n  const cutoff = Date.now() - WINDOW_MS;\n  const count = {};\n  const out = { technical: [], world: [] };\n\n  const all = $input.all();\n  for (let i = 0; i < all.length; i++) {\n    const j = all[i].json;\n    if (j.error || !j.title) continue; // failed feed or empty entry\n    // pairedItem.item is the item's index in this node's own input, so trace back to the feed\n    // through n8n's item linking instead of indexing Feed List directly\n    let feed;\n    try { feed = $('Feed List').itemMatching(i).json; } catch (e) { feed = null; }\n    if (!feed) continue;\n\n    const source = (feed.url.match(/^https?:\\/\\/(?:www\\.)?([^\\/]+)/) || [])[1] || feed.url;\n    const isArxiv = source.includes('arxiv');\n    const ts = Date.parse(j.isoDate || j.pubDate || '');\n    if (!isArxiv && !Number.isNaN(ts) && ts < cutoff) continue;\n\n    count[feed.url] = (count[feed.url] || 0) + 1;\n    if (count[feed.url] > (isArxiv ? ARXIV_CAP : CAP)) continue;\n\n    const text = (j.contentSnippet || j.content || j.summary || '')\n      .replace(/<[^>]*>/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim()\n      .slice(0, 220);\n\n    out[feed.category].push({\n      title: j.title,\n      source,\n      url: j.link,\n      published: j.isoDate || j.pubDate || null,\n      snippet: text,\n    });\n  }\n  // Fail loudly: an empty digest from broken ingestion must not look like a quiet news day\n  const failed = all.filter((x) => x.json.error).length;\n  if (!out.technical.length && !out.world.length) {\n    throw new Error('No articles passed filtering. RSS items: ' + all.length + ', failed feeds: ' + failed);\n  }\n  return [{ json: out }];\n"
+      },
+      "id": "a1000001-0000-4000-8000-000000000004",
+      "name": "Filter & Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify({ technical: $json.technical, world: $json.world }) }}",
+        "hasOutputParser": false,
+        "options": {
+          "systemMessage": "You are my personal news analyst. Turn raw RSS items into a short, high-signal daily digest.\n\n## My interests\n[PASTE YOUR INTERESTS HERE]\n\n## Rules\n- You get JSON with two arrays: \"technical\" and \"world\". Each item has title, source, url, published, snippet.\n- Pick only items that matter given my interests. Drop noise, duplicates and low-value items. There is no fixed count; fewer is fine.\n- Merge items covering the same story into one entry and use the best url.\n- Group items under short topic headings (for example \"AI research\", \"Security\", \"Middle East\", \"Asia\").\n- summary: 1-2 plain sentences. why_it_matters: one sentence tied to my interests.\n- importance: 1 (minor) to 5 (must read). Sort items by importance inside each group, and groups by their top item.\n- tldr: 3-5 bullets covering the most important things across both sections.\n- Use only the information in the items. Never invent facts or urls.\n- Return valid JSON only, with no Markdown fences or text outside the JSON, in exactly this shape:\n{\"date\":\"YYYY-MM-DD\",\"tldr\":[\"...\"],\"technical\":[{\"topic\":\"...\",\"items\":[{\"title\":\"...\",\"source\":\"...\",\"url\":\"...\",\"published\":\"...\",\"summary\":\"...\",\"why_it_matters\":\"...\",\"importance\":4}]}],\"world\":[same shape as technical],\"statistics\":{\"total_received\":0,\"total_selected\":0,\"total_merged\":0,\"total_discarded\":0}}"
+        }
+      },
+      "id": "a1000001-0000-4000-8000-000000000005",
+      "name": "Digest Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        880,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 20000
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = (s) => String(s ?? '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\n\n// The agent returns plain JSON text (no tool-calling), possibly wrapped in code fences\nlet d = $json.output;\nif (typeof d === 'string') {\n  const s = d.replace(/^\\s*```(?:json)?\\s*/i, '').replace(/\\s*```\\s*$/, '').trim();\n  try {\n    d = JSON.parse(s);\n  } catch (e) {\n    const m = s.match(/\\{[\\s\\S]*\\}/);\n    try { d = m ? JSON.parse(m[0]) : null; } catch (e2) { d = null; }\n  }\n}\nif (!d || typeof d !== 'object') {\n  throw new Error('Agent did not return valid JSON: ' + String($json.output).slice(0, 300));\n}\n\nconst date = new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });\n\nconst section = (title, groups = []) => {\n  if (!groups.length) return `<h2>${title}</h2><p style=\"color:#666\">Nothing important today.</p>`;\n  const body = groups.map((g) => `\n    <h3 style=\"margin:18px 0 6px;color:#333\">${esc(g.topic ?? g.heading)}</h3>\n    ${(g.items || []).map((it) => `\n      <div style=\"margin:0 0 14px;padding-left:10px;border-left:3px solid #ddd\">\n        <a href=\"${esc(it.url)}\" style=\"font-weight:600;color:#1a56db;text-decoration:none\">${esc(it.title)}</a>\n        <span style=\"color:#888;font-size:12px\"> · ${esc(it.source)}${it.importance ? ` · ${'★'.repeat(Math.min(5, Math.max(1, it.importance)))}` : ''}</span>\n        <div style=\"margin-top:3px\">${esc(it.summary)}</div>\n        ${it.why_it_matters ? `<div style=\"margin-top:3px;color:#555\"><em>Why it matters:</em> ${esc(it.why_it_matters)}</div>` : ''}\n      </div>`).join('')}`).join('');\n  return `<h2 style=\"border-bottom:2px solid #222;padding-bottom:4px\">${title}</h2>${body}`;\n};\n\nconst st = d.statistics;\nconst stats = st ? `<p style=\"color:#888;font-size:12px;margin-top:24px\">Received ${esc(st.total_received)} · selected ${esc(st.total_selected)} · merged ${esc(st.total_merged)} · discarded ${esc(st.total_discarded)}</p>` : '';\nconst tldr = (d.tldr || []).map((t) => `<li>${esc(t)}</li>`).join('');\nconst html = `<div style=\"font-family:Arial,sans-serif;max-width:680px;margin:auto;line-height:1.5;color:#111\">\n  <h1 style=\"margin-bottom:0\">Daily Digest</h1><div style=\"color:#888\">${date}</div>\n  <h2>TL;DR</h2><ul>${tldr}</ul>\n  ${section('Technical', d.technical)}\n  ${section('World News', d.world)}\n  ${stats}\n</div>`;\nreturn [{ json: { subject: `Daily Digest · ${date}`, html } }];\n"
+      },
+      "id": "a1000001-0000-4000-8000-000000000007",
+      "name": "Render HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "you@example.com",
+        "toEmail": "you@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "a1000001-0000-4000-8000-000000000008",
+      "name": "Send Email (SMTP)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "auto"
+        },
+        "options": {}
+      },
+      "id": "a1000001-0000-4000-8000-000000000009",
+      "name": "LLM (OpenAI-compatible)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        220
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_ME",
+          "name": "LLM API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "6 AM IST Trigger": {
+      "main": [
+        [
+          {
+            "node": "Feed List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feed List": {
+      "main": [
+        [
+          {
+            "node": "Read RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read RSS": {
+      "main": [
+        [
+          {
+            "node": "Filter & Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Normalize": {
+      "main": [
+        [
+          {
+            "node": "Digest Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Digest Agent": {
+      "main": [
+        [
+          {
+            "node": "Render HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render HTML": {
+      "main": [
+        [
+          {
+            "node": "Send Email (SMTP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM (OpenAI-compatible)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Digest Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "errorWorkflow": "ErrAlertDigest001"
+  },
+  "active": false,
+  "id": "TTPG4MPtY4EQmPyJ"
+}

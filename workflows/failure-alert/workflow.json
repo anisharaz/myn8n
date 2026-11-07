@@ -1,0 +1,53 @@
+{
+  "id": "ErrAlertDigest001",
+  "name": "Failure Alert (email)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c1000001-0000-4000-8000-000000000001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "you@example.com",
+        "toEmail": "you@example.com",
+        "subject": "={{ 'FAILED: ' + $json.workflow.name }}",
+        "emailFormat": "html",
+        "html": "={{ '<div style=\"font-family:Arial,sans-serif\"><h2 style=\"color:#b91c1c\">Workflow failed</h2>'\n + '<p><b>Workflow:</b> ' + $json.workflow.name + '</p>'\n + '<p><b>Failed node:</b> ' + ($json.execution.lastNodeExecuted || 'unknown') + '</p>'\n + '<p><b>Error:</b> ' + String($json.execution.error?.message || 'unknown').replace(/</g, '&lt;') + '</p>'\n + '<p><b>Execution:</b> <a href=\"' + $json.execution.url + '\">' + $json.execution.id + '</a></p></div>' }}",
+        "options": {}
+      },
+      "id": "c1000001-0000-4000-8000-000000000002",
+      "name": "Send Alert (SMTP)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        220,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send Alert (SMTP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "active": false
+}
